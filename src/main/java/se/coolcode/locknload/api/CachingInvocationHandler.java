@@ -1,17 +1,15 @@
-package se.coolcode.locknload.core;
+package se.coolcode.locknload.api;
 
 import se.coolcode.locknload.annotations.Cache;
-import se.coolcode.locknload.annotations.Resource;
-import se.coolcode.locknload.api.Lock;
-import se.coolcode.locknload.api.Template;
+import se.coolcode.locknload.api.exceptions.InvocationException;
+import se.coolcode.locknload.api.exceptions.LockException;
+import se.coolcode.locknload.api.templates.Template;
+import se.coolcode.locknload.util.CacheUtil;
 
-import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.util.ArrayList;
-import java.util.List;
 
 public class CachingInvocationHandler implements InvocationHandler {
 
@@ -28,28 +26,32 @@ public class CachingInvocationHandler implements InvocationHandler {
         try {
             Cache cacheAnnotation = method.getAnnotation(Cache.class);
             if (cacheAnnotation != null) {
+                String user = CacheUtil.getUser(method, args);
+                String resource = CacheUtil.getResource(cacheAnnotation, method, args);
                 if (cacheAnnotation.lock() != Cache.Strategy.DISABLE) {
-                    return executeLocked(cacheAnnotation, method, args);
+                    return executeLocked(cacheAnnotation, method, args, user, resource);
                 } else {
-                    return executeCached(cacheAnnotation, method, args);
+                    return executeCached(method, args, user, resource);
                 }
             }
             return method.invoke(target, args);
         } catch (InvocationTargetException e) {
             throw e.getCause();
+        } catch (IllegalAccessException e) {
+            throw new InvocationException("Failed to invoke " + method.getName(), e);
         }
     }
 
-    private Object executeLocked(Cache cacheAnnotation, Method method, Object[] args) throws InvocationTargetException, IllegalAccessException {
+    private Object executeLocked(Cache cacheAnnotation, Method method, Object[] args, String user, String resource) throws InvocationTargetException, IllegalAccessException {
         Lock lock = null;
         try {
-            Object data = template.get(method, args);
+            Object data = template.get(user, resource);
             if (data == null) {
-                lock = template.getLock(method, args);
+                lock = CacheUtil.getLock(cacheAnnotation, user, resource, template);
                 if (lock.lock()) {
-                    data = executeCached(cacheAnnotation, method, args);
+                    data = executeCached(method, args, user, resource);
                 } else {
-                    throw new LockException("Failed to lock resource: " + getResource(cacheAnnotation, method, args) + ".");
+                    throw new LockException(String.format("Failed to lock resource: %s.", resource));
                 }
             }
             return data;
@@ -60,33 +62,13 @@ public class CachingInvocationHandler implements InvocationHandler {
         }
     }
 
-    private Object executeCached(Cache cacheAnnotation, Method method, Object[] args) throws InvocationTargetException, IllegalAccessException {
-        Object data = template.get(method, args);
+    private Object executeCached(Method method, Object[] args, String user, String resource) throws InvocationTargetException, IllegalAccessException {
+        Object data = template.get(user, resource);
         if (data == null) {
             data = method.invoke(target, args);
-            template.put(data, method, args);
+            template.put(user, resource, data);
         }
         return data;
-    }
-
-    private String getResource(Cache cacheAnnotation, Method method, Object[] args) {
-        List<String> resources = getAnnotatedParameterValues(Resource.class, method, args);
-        resources.addFirst(cacheAnnotation.resource());
-        return String.join("-", resources);
-    }
-
-    private List<String> getAnnotatedParameterValues(Class<?> annotation, Method method, Object[] args) {
-        int i = 0;
-        List<String> values = new ArrayList<>();
-        for (Annotation[] parameterAnnotations : method.getParameterAnnotations()) {
-            for (Annotation parameterAnnotation : parameterAnnotations) {
-                if (parameterAnnotation.annotationType().equals(annotation)) {
-                    values.add(args[i].toString());
-                }
-            }
-            i++;
-        }
-        return values;
     }
 
     public static <T, I extends T> Builder<T, I> builder(Class<T> type, I target) {
